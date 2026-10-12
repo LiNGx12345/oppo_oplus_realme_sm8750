@@ -283,7 +283,7 @@ jobs:
             grep -q "kernelsu" common/drivers/Makefile || echo "obj-\$(CONFIG_KSU) += kernelsu/" >> common/drivers/Makefile
             grep -q "drivers/kernelsu/Kconfig" common/drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
             cd FinaSU
-            KSU_VERSION=$(expr $(git rev-list --count master) + 30700 2>/dev/null || echo 114514)
+            KSU_VERSION="FinaSU-$(git rev-parse --short HEAD)"
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
             cd ..
@@ -653,6 +653,15 @@ jobs:
           echo "编译后空间:"
           df -h
 
+      - name: 检查 SUSFS 编译状态
+        if: inputs.susfs_enable && github.event.inputs.ksu_type == 'finasu'
+        run: |
+          cd kernel_workspace/common
+          echo "=== FinaSU 下的 SUSFS 配置状态 ==="
+          grep -E "KSU_SUSFS" out/.config || echo "未找到 KSU_SUSFS 配置项"
+          echo "=== 相关 SUSFS 函数符号 ==="
+          grep -E "susfs" out/System.map 2>/dev/null | head -20 || echo "System.map 中未找到 susfs 符号"
+          
       - name: 保存新的 ccache 缓存
         if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
@@ -826,6 +835,7 @@ jobs:
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
+          - FinaSU管理器下载：[FinaSU](https://github.com/LyraVoid/FinaSU/releases)
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
