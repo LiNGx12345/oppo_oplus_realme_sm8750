@@ -283,10 +283,9 @@ jobs:
             ln -sf "$(realpath --relative-to="$DRIVER_DIR" "$(pwd)/kernel")" "$DRIVER_DIR/kernelsu"
             grep -q "kernelsu" "$DRIVER_DIR/Makefile" || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> "$DRIVER_DIR/Makefile"
             grep -q "source \"drivers/kernelsu/Kconfig\"" "$DRIVER_DIR/Kconfig" || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" "$DRIVER_DIR/Kconfig"
-            KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/LyraVoid/FinaSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+            KSU_VERSION=$(expr $(git rev-list --count HEAD) + 30000 2>/dev/null || echo 30000)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-            sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
           else
             echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
           fi
