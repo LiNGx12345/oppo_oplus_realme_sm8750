@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu_type:
-        description: 'KernelSU分支(BakaSU/SukiSU Ultra/KernelSU Next/FinaSU/KSU(原版)/无内置KSU,默认BakaSU)'
+        description: 'KernelSU分支(BakaSU/SukiSU Ultra/KernelSU Next/KSU(原版)/无内置KSU,默认BakaSU)'
         required: true
         type: choice
         default: 'bakasu'
@@ -20,7 +20,6 @@ on:
           - 'bakasu'
           - 'sukisu'
           - 'ksunext'
-          - 'finasu'
           - 'ksu'
           - 'none'
       susfs_enable:
@@ -276,17 +275,6 @@ jobs:
             cd ../common/drivers/kernelsu
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apk_sign.patch
             patch -p2 -N -F 3 < apk_sign.patch || true
-                    elif [[ ${{ github.event.inputs.ksu_type }} == "finasu" ]]; then
-            echo "正在配置 FinaSU..."
-            git clone --depth=1 https://github.com/LyraVoid/FinaSU.git -b master FinaSU
-            ln -sf "$(realpath --relative-to="$PWD/common/drivers" "$PWD/FinaSU/kernel")" "common/drivers/kernelsu"
-            grep -q "kernelsu" common/drivers/Makefile || echo "obj-\$(CONFIG_KSU) += kernelsu/" >> common/drivers/Makefile
-            grep -q "drivers/kernelsu/Kconfig" common/drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
-            cd FinaSU
-            KSU_VERSION="FinaSU-$(git rev-parse --short HEAD)"
-            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-            cd ..
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             echo "正在配置原版 KernelSU (tiann/KernelSU)..."
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
@@ -300,7 +288,7 @@ jobs:
           fi
 
       - name: 应用 KernelSU & SUSFS 补丁
-        if: inputs.susfs_enable && github.event.inputs.ksu_type != 'finasu'
+        if: inputs.susfs_enable
         run: |
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
@@ -353,7 +341,7 @@ jobs:
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
-        if: inputs.susfs_enable && github.event.inputs.ksu_type != 'finasu'
+        if: inputs.susfs_enable
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -653,15 +641,6 @@ jobs:
           echo "编译后空间:"
           df -h
 
-      - name: 检查 SUSFS 编译状态
-        if: inputs.susfs_enable && github.event.inputs.ksu_type == 'finasu'
-        run: |
-          cd kernel_workspace/common
-          echo "=== FinaSU 下的 SUSFS 配置状态 ==="
-          grep -E "KSU_SUSFS" out/.config || echo "未找到 KSU_SUSFS 配置项"
-          echo "=== 相关 SUSFS 函数符号 ==="
-          grep -E "susfs" out/System.map 2>/dev/null | head -20 || echo "System.map 中未找到 susfs 符号"
-          
       - name: 保存新的 ccache 缓存
         if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
@@ -701,8 +680,6 @@ jobs:
             KSU_TYPENAME="KSUNext"
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             KSU_TYPENAME="KSU"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "finasu" ]]; then
-            KSU_TYPENAME="FinaSU"
           else
             KSU_TYPENAME="none"
           fi
@@ -803,8 +780,6 @@ jobs:
             KSU_TYPENAME="KernelSU Next"
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             KSU_TYPENAME="KSU"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "finasu" ]]; then
-            KSU_TYPENAME="FinaSU"
           else
             KSU_TYPENAME="无内置KSU"
           fi
@@ -835,7 +810,6 @@ jobs:
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
-          - FinaSU管理器下载：[FinaSU](https://github.com/LyraVoid/FinaSU/releases)
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
