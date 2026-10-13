@@ -288,10 +288,9 @@ jobs:
             echo "正在配置 FinaSU (LyraVoid/FinaSU)..."
             curl -LSs "https://raw.githubusercontent.com/LyraVoid/FinaSU/master/kernel/setup.sh" | bash -s master
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
-            cd ./FinaSU
-            # 生成自定义版本号（基于提交计数）, 失败时使用 114514
-            KSU_VERSION=$(expr $(git rev-list --count master) + 30000 2>/dev/null || echo 114514)
-            # 存储版本号到 GitHub 环境变量
+            cd ./KernelSU          # 修改：FinaSU 的 setup.sh 克隆到 KernelSU 目录
+            # 生成自定义版本号（基于当前分支提交计数）, 失败时使用 114514
+            KSU_VERSION=$(expr $(git rev-list --count HEAD) + 30000 2>/dev/null || echo 114514)   # 修改：使用 HEAD 而非 master
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
           else
