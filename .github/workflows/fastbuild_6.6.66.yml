@@ -23,15 +23,11 @@ on:
           - 'finasu'
           - 'ksu'
           - 'none'
-      finasu_hook:
-        description: 'FinaSU钩子后端(仅ksu_type=finasu生效): susfs_inline=直调SUSFS内联钩子(默认,内核树缺少FinaSU调用点会直接报错并列出缺失项); auto=缺失时自动回退Tracepoint继续构建; tracepoint=强制兼容后端'
-        required: false
-        type: choice
-        default: 'susfs_inline'
-        options:
-          - 'susfs_inline'
-          - 'auto'
-          - 'tracepoint'
+      nomount_enable:
+        description: '是否内置 NoMount 引擎(替代 Mountify/meta-overlayfs 的挂载方案, 走 VFS 重定向不产生任何 mount; FinaSU 管理器"设置→功能→Folk Mount→模式 Built-in (VFS)"可直接管理, 与 SUSFS 同开可能互相干扰, 出问题可关闭)'
+        required: true
+        type: boolean
+        default: 'true'
       susfs_enable:
         description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
         required: true
@@ -112,7 +108,6 @@ jobs:
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
       ak3name: ${{ steps.create_zip.outputs.ak3name }}
-      hookname: ${{ steps.create_zip.outputs.hookname }}
     permissions:
       actions: write
       contents: read
@@ -371,44 +366,23 @@ jobs:
                 grep -rqs "$sym" ./include/linux/susfs.h ./include/linux/susfs_def.h ./fs/susfs.c || \
                   echo "::warning::SUSFS 补丁未提供 $sym，FinaSU 可能编译失败"
               done
-              # ---- 钩子后端选择 ----
-              # SUSFS Inline 不走 kprobe/系统调用替换，要求内核树在这些位置直接调用 FinaSU 的 ksu_handle_*
-              # 入口（FinaSU kernel/tools/check_susfs_inline.sh 中要求的 12 处）。上游 50 补丁是否自带这些
-              # 调用点取决于其版本，因此这里直接用 FinaSU 自己的检查脚本实测，而不是假设它一定存在。
-              FINASU_HOOK_REQ="${{ github.event.inputs.finasu_hook }}"
-              FINASU_HOOK="$FINASU_HOOK_REQ"
-              if [[ -z "$FINASU_HOOK" ]]; then FINASU_HOOK="susfs_inline"; fi
-              if [[ "$FINASU_HOOK" != "susfs_inline" && "$FINASU_HOOK" != "auto" && "$FINASU_HOOK" != "tracepoint" ]]; then
-                FINASU_HOOK="susfs_inline"
-              fi
-              if [[ "$FINASU_HOOK" != "tracepoint" ]]; then
-                # 若 FinaSU 源码分支自带 inline 调用点补丁则先应用（不同分支可能提供，缺失属正常）
-                for p in ../FinaSU/kernel/patches/*inline*.patch ../FinaSU/patches/*inline*.patch; do
-                  if [[ -f "$p" ]]; then
-                    echo "应用 FinaSU 自带 inline 补丁：$p"
-                    patch -p1 -F 3 < "$p" || true
-                  fi
-                done
-                if sh ../FinaSU/kernel/tools/check_susfs_inline.sh "$(pwd)"; then
-                  FINASU_HOOK="susfs_inline"
-                elif [[ "$FINASU_HOOK" == "auto" ]]; then
-                  FINASU_HOOK="tracepoint"
-                  echo "::warning::内核树缺少 FinaSU 的 SUSFS Inline 直接调用点（缺失项见上方 missing 列表），已按 auto 回退为 Tracepoint 后端"
-                else
-                  echo "::error::内核树缺少 FinaSU 的 SUSFS Inline 直接调用点（缺失项见上方 missing 列表），无法启用 SUSFS Inline"
-                  echo "可以考虑：① 把 finasu_hook 改为 auto 先构建可用的 Tracepoint 内核；② 更换带 FinaSU 调用点的 SUSFS 补丁提交"
-                  exit 1
+              # ---- 钩子后端：固定 SUSFS Inline ----
+              # 用 SUSFS 就是为了那几个隐藏特性，而 Inline 是不走 kprobe/系统调用替换的直调后端，
+              # 因此这里不做开关。Inline 需要内核树在 12 处位置直接调用 FinaSU 的 ksu_handle_* 入口，
+              # 用 FinaSU 自己的检查脚本实测；缺失则直接失败，而不是悄悄退化成 Tracepoint。
+              for p in ../FinaSU/kernel/patches/*inline*.patch ../FinaSU/patches/*inline*.patch; do
+                if [[ -f "$p" ]]; then
+                  echo "应用 FinaSU 自带 inline 补丁：$p"
+                  patch -p1 -F 3 < "$p" || true
                 fi
+              done
+              if ! sh ../FinaSU/kernel/tools/check_susfs_inline.sh "$(pwd)"; then
+                echo "::error::内核树缺少 FinaSU 的 SUSFS Inline 直接调用点（缺失项见上方输出），无法启用 SUSFS Inline"
+                echo "修复方向：换用带 FinaSU 直调点的 SUSFS 补丁提交，或把缺失的调用点补进内核树"
+                exit 1
               fi
-              echo "FINASU_HOOK=$FINASU_HOOK" >> $GITHUB_ENV
-              echo "FinaSU 钩子后端：$FINASU_HOOK"
-              {
-                echo "### FinaSU 钩子后端：$FINASU_HOOK"
-                echo ''
-                echo "- 请求值：${FINASU_HOOK_REQ:-未指定，按 susfs_inline 处理}"
-                echo "- 判定依据：\`kernel/tools/check_susfs_inline.sh\` 对内核树的直接调用点实测结果"
-                echo "- tracepoint 表示走 kprobe/系统调用替换，Inline 表示 SUSFS 内联直调"
-              } >> "$GITHUB_STEP_SUMMARY"
+              echo "FINASU_HOOK=susfs_inline" >> $GITHUB_ENV
+              echo "FinaSU 钩子后端：SUSFS Inline（直调点检查通过）"
             fi
             cd ..
           else
@@ -420,6 +394,49 @@ jobs:
             cd ./KernelSU
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
           fi
+
+      - name: 添加 NoMount (FinaSU 内建引擎)
+        if: inputs.nomount_enable && github.event.inputs.ksu_type == 'finasu'
+        run: |
+          # 用 FinaSU 自己 vendored 的引擎(maxsteeel/nomount v2.2.0, 驱动 API 22)，
+          # 而不是 NoMount-Suite: 后者走 generic netlink，FinaSU 的 ksud 只认 keyring 传输
+          # (key_type.name="nomount")，两者不能互相识别，管理器里会一直显示"不可用"。
+          cd kernel_workspace
+          NM_SRC="./FinaSU/userspace/nomount/kernel/src"
+          if [[ ! -f "$NM_SRC/nomount.c" || ! -f "$NM_SRC/nomount.h" || ! -f "$NM_SRC/Kconfig" || ! -f "$NM_SRC/Makefile" ]]; then
+            echo "::error::FinaSU 仓库里没有 userspace/nomount/kernel/src，无法内置 NoMount"
+            ls -R ./FinaSU/userspace | head -40 || true
+            exit 1
+          fi
+          echo "NoMount 引擎来源：$(grep -m1 NOMOUNT_BASE_VERSION "$NM_SRC/nomount.h")"
+          cd common
+          # 树内集成只需要两处挂点(上游 kernel/setup.sh 也是只改这两个文件)：
+          #   fs/Makefile 里加 obj-$(CONFIG_NOMOUNT) += nomount/（进入子目录）
+          #   fs/Kconfig  里 source 进 fs/nomount/Kconfig
+          # 引擎自己用跨模块的 VFS 钩子(改 inode->i_op/i_fop)工作，不需要 SUSFS/mountify 那样的调用点改写
+          mkdir -p fs/nomount
+          cp "$NM_SRC/nomount.c" ./fs/nomount/nomount.c
+          cp "$NM_SRC/nomount.h" ./fs/nomount/nomount.h
+          cp "$NM_SRC/Kconfig" ./fs/nomount/Kconfig
+          # 上游 Makefile 里带 obj-$(CONFIG_NOMOUNT) += nomount.o 与 -O3/gnu11 以及
+          # xattr __get 的自动探测，原样使用可保证与上游编译行为一致
+          cp "$NM_SRC/Makefile" ./fs/nomount/Makefile
+          if ! grep -q 'obj-$(CONFIG_NOMOUNT) += nomount/' fs/Makefile; then
+            echo 'obj-$(CONFIG_NOMOUNT) += nomount/' >> fs/Makefile
+          fi
+          if ! grep -q 'source "fs/nomount/Kconfig"' fs/Kconfig; then
+            # 插在 fs/Kconfig 最后一个 endmenu 之前，落在 "File systems" 顶层菜单里
+            # (fs/Kconfig 中间还有 Pseudo filesystems 等子菜单，不能取第一个 endmenu)
+            awk '{ line[NR] = $0; if ($0 ~ /^endmenu/) last = NR }
+                 END { for (i = 1; i <= NR; i++) { if (i == last) print "source \"fs/nomount/Kconfig\""; print line[i] } }' \
+              fs/Kconfig > fs/Kconfig.new && mv fs/Kconfig.new fs/Kconfig
+          fi
+          grep -q 'obj-$(CONFIG_NOMOUNT) += nomount/' fs/Makefile || { echo "::error::fs/Makefile 未加入 nomount 子目录目标"; exit 1; }
+          grep -q 'source "fs/nomount/Kconfig"' fs/Kconfig || { echo "::error::fs/Kconfig 未 source nomount/Kconfig"; exit 1; }
+          grep -q 'config NOMOUNT' fs/nomount/Kconfig || { echo "::error::fs/nomount/Kconfig 缺失 config NOMOUNT"; exit 1; }
+          grep -q 'obj-$(CONFIG_NOMOUNT) += nomount.o' fs/nomount/Makefile || { echo "::error::fs/nomount/Makefile 未定义 nomount.o"; exit 1; }
+          echo "NoMount 引擎已并入 fs/nomount/，等待 CONFIG_NOMOUNT=y"
+
           
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
@@ -499,9 +516,16 @@ jobs:
           if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
             echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
-          #添加对 Mountify (backslashxx/mountify) 模块的支持
+          # 内核已内置 NoMount 引擎(FinaSU vendored 的 maxsteeel/nomount)：用 VFS 重定向代替挂载，
+          # 不需要 overlayfs，也不需要任何元模块
+          # 这两个 tmpfs 项仍保留（系统与其余模块会用到），但不再是为了 Mountify 的 tmpfs 元模块方案
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
+          if [[ "${{ github.event.inputs.nomount_enable }}" == "true" && "${{ github.event.inputs.ksu_type }}" == "finasu" ]]; then
+            echo "CONFIG_NOMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            # 引擎通过 keyring 传输跟 ksud 通信(register_key_type 注册 "nomount" 类型)
+            echo "CONFIG_KEYS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
           if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
             echo "CONFIG_ZSMALLOC=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -864,12 +888,6 @@ jobs:
           fi
           zip -r ../$AK3_NAME ./*
           echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
-          # 钩子后端透传给 release job（GITHUB_ENV 不能跨 job），非 FinaSU 分支记为 n/a
-          if [[ "${{ github.event.inputs.ksu_type }}" == "finasu" ]]; then
-            echo "hookname=${FINASU_HOOK:-tracepoint}" >> $GITHUB_OUTPUT
-          else
-            echo "hookname=n/a" >> $GITHUB_OUTPUT
-          fi
           
           #为AK3添加注释（调试信息）
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
@@ -889,6 +907,7 @@ jobs:
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
           echo "KSU Hook: ${FINASU_HOOK:-n/a}" >> ./ak3.log
           echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
+          echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
@@ -962,10 +981,10 @@ jobs:
           fi
           echo "KSU_TYPENAME=$KSU_TYPENAME" >> $GITHUB_ENV
           if [[ "${{ github.event.inputs.ksu_type }}" == "finasu" ]]; then
-            if [[ "${{ needs.build.outputs.hookname }}" == "susfs_inline" ]]; then
+            if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
               HOOK_NOTE="- FinaSU钩子后端：SUSFS Inline（内联直调，管理器内应显示 SUSFS Inline）"
             else
-              HOOK_NOTE="- FinaSU钩子后端：Tracepoint（内核树缺少 Inline 直调点时自动回退）"
+              HOOK_NOTE="- FinaSU钩子后端：Tracepoint（未开启 SUSFS，Inline 后端依赖 KSU_SUSFS）"
             fi
           else
             HOOK_NOTE=""
@@ -985,6 +1004,7 @@ jobs:
           - KSU分支：${{ env.KSU_TYPENAME }}
           ${{ env.HOOK_NOTE }}
           - susfs支持：${{ github.event.inputs.susfs_enable }}
+          - NoMount内核引擎(VFS直读写,无需元模块/不产生mount)：${{ github.event.inputs.nomount_enable }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
           - LZ4支持：${{ github.event.inputs.lz4_enable }}
           - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}
@@ -1000,7 +1020,7 @@ jobs:
           - FinaSU管理器下载：[FinaSU](https://github.com/LyraVoid/FinaSU/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
           - 注：FinaSU 以内置(非LKM)方式编译，内核内已固化 FinaSU 官方管理器证书(CN=FolkSU)；若使用自行签名的管理器，需用其证书重新构建内核
-          - 注：SUSFS Inline 需要内核树在这些位置存在 FinaSU 的直调入口(drivers/input/input.c、fs/exec.c、fs/open.c、fs/stat.c、fs/read_write.c、kernel/reboot.c、kernel/sys.c)；上游 SUSFS 补丁未提供时会按 finasu_hook 设置回退或直接报错
+          - 注：SUSFS Inline 需要内核树在这些位置存在 FinaSU 的直调入口(drivers/input/input.c、fs/exec.c、fs/open.c、fs/stat.c、fs/read_write.c、kernel/reboot.c、kernel/sys.c)；构建时已用 FinaSU 自带脚本实测，不满足会直接失败而非退化
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
@@ -1011,8 +1031,9 @@ jobs:
           2. 若你的手机之前已有 root 权限，可在手机上安装[HorizonKernelFlasher](https://github.com/libxzr/HorizonKernelFlasher/releases)，在HorizonKernelFlasher中刷入AnyKernel刷机包并重启；
           3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
-          5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与(Re)SukiSU内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
+          5. 本内核已内置 NoMount 引擎（FinaSU vendored 的上游 maxsteeel/nomount，驱动 API 22，keyring 传输）：模块文件由内核 VFS 直接重定向提供，既不使用 overlayfs 也不产生任何 mount，**不需要刷任何元模块**。FinaSU 管理器里「设置 → 功能 → Folk Mount → 模式」选 **Built-in (VFS)** 并重启即可，页面会显示驱动「就绪 / 内核内建」，之后可在此页面按 UID 管理例外应用、热注入或撤下规则；命令行可用 `/data/adb/ksud nomount status --json` 查看。注意：不要同时安装 mountify / meta-overlayfs / NoMount-Suite 之类的挂载类元模块（KSU 只允许一个元模块，且会和内置后端争同一套接口）；若想改用别的挂载方案，请把 `nomount_enable` 关掉重新构建；
+          6. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）在**未内置 NoMount**的内核上仍需配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [NoMount Suite](https://github.com/Bouteillepleine/NoMount-Suite), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
+          7. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与(Re)SukiSU内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
           EOF
