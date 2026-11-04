@@ -23,6 +23,15 @@ on:
           - 'finasu'
           - 'ksu'
           - 'none'
+      finasu_hook:
+        description: 'FinaSU钩子后端(仅ksu_type=finasu生效): susfs_inline=直调SUSFS内联钩子(默认,内核树缺少FinaSU调用点会直接报错并列出缺失项); auto=缺失时自动回退Tracepoint继续构建; tracepoint=强制兼容后端'
+        required: false
+        type: choice
+        default: 'susfs_inline'
+        options:
+          - 'susfs_inline'
+          - 'auto'
+          - 'tracepoint'
       susfs_enable:
         description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
         required: true
@@ -103,6 +112,7 @@ jobs:
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
       ak3name: ${{ steps.create_zip.outputs.ak3name }}
+      hookname: ${{ steps.create_zip.outputs.hookname }}
     permissions:
       actions: write
       contents: read
@@ -361,6 +371,44 @@ jobs:
                 grep -rqs "$sym" ./include/linux/susfs.h ./include/linux/susfs_def.h ./fs/susfs.c || \
                   echo "::warning::SUSFS 补丁未提供 $sym，FinaSU 可能编译失败"
               done
+              # ---- 钩子后端选择 ----
+              # SUSFS Inline 不走 kprobe/系统调用替换，要求内核树在这些位置直接调用 FinaSU 的 ksu_handle_*
+              # 入口（FinaSU kernel/tools/check_susfs_inline.sh 中要求的 12 处）。上游 50 补丁是否自带这些
+              # 调用点取决于其版本，因此这里直接用 FinaSU 自己的检查脚本实测，而不是假设它一定存在。
+              FINASU_HOOK_REQ="${{ github.event.inputs.finasu_hook }}"
+              FINASU_HOOK="$FINASU_HOOK_REQ"
+              if [[ -z "$FINASU_HOOK" ]]; then FINASU_HOOK="susfs_inline"; fi
+              if [[ "$FINASU_HOOK" != "susfs_inline" && "$FINASU_HOOK" != "auto" && "$FINASU_HOOK" != "tracepoint" ]]; then
+                FINASU_HOOK="susfs_inline"
+              fi
+              if [[ "$FINASU_HOOK" != "tracepoint" ]]; then
+                # 若 FinaSU 源码分支自带 inline 调用点补丁则先应用（不同分支可能提供，缺失属正常）
+                for p in ../FinaSU/kernel/patches/*inline*.patch ../FinaSU/patches/*inline*.patch; do
+                  if [[ -f "$p" ]]; then
+                    echo "应用 FinaSU 自带 inline 补丁：$p"
+                    patch -p1 -F 3 < "$p" || true
+                  fi
+                done
+                if sh ../FinaSU/kernel/tools/check_susfs_inline.sh "$(pwd)"; then
+                  FINASU_HOOK="susfs_inline"
+                elif [[ "$FINASU_HOOK" == "auto" ]]; then
+                  FINASU_HOOK="tracepoint"
+                  echo "::warning::内核树缺少 FinaSU 的 SUSFS Inline 直接调用点（缺失项见上方 missing 列表），已按 auto 回退为 Tracepoint 后端"
+                else
+                  echo "::error::内核树缺少 FinaSU 的 SUSFS Inline 直接调用点（缺失项见上方 missing 列表），无法启用 SUSFS Inline"
+                  echo "可以考虑：① 把 finasu_hook 改为 auto 先构建可用的 Tracepoint 内核；② 更换带 FinaSU 调用点的 SUSFS 补丁提交"
+                  exit 1
+                fi
+              fi
+              echo "FINASU_HOOK=$FINASU_HOOK" >> $GITHUB_ENV
+              echo "FinaSU 钩子后端：$FINASU_HOOK"
+              {
+                echo "### FinaSU 钩子后端：$FINASU_HOOK"
+                echo ''
+                echo "- 请求值：${FINASU_HOOK_REQ:-未指定，按 susfs_inline 处理}"
+                echo "- 判定依据：\`kernel/tools/check_susfs_inline.sh\` 对内核树的直接调用点实测结果"
+                echo "- tracepoint 表示走 kprobe/系统调用替换，Inline 表示 SUSFS 内联直调"
+              } >> "$GITHUB_STEP_SUMMARY"
             fi
             cd ..
           else
@@ -419,6 +467,13 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
+            # 钩子后端：由「应用 KernelSU & SUSFS 补丁」步骤实测内核树后写入 FINASU_HOOK，
+            # susfs_inline 才会写 CONFIG_KSU_HOOK_SUSFS_INLINE，否则保持 Kconfig 默认的 Tracepoint
+            if [[ "${FINASU_HOOK:-tracepoint}" == "susfs_inline" ]]; then
+              echo "CONFIG_KSU_HOOK_SUSFS_INLINE=y" >> ./common/arch/arm64/configs/gki_defconfig
+            else
+              echo "CONFIG_KSU_HOOK_TRACEPOINT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            fi
           else
             echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -734,6 +789,10 @@ jobs:
             echo "--- [FinaSU] 预安装 uapi 头文件，确保 preinit 运行器被编入 ---"
             make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" LD="ld.lld" HOSTLD=ld.lld O=out headers_install
             ls -l out/usr/include/linux/unistd.h || echo "::warning::未找到 out/usr/include/linux/unistd.h，preinit 可能未被编入"
+            # 确认 defconfig 真的吃进了期望的钩子后端（choice 项写错会被静默丢弃，这里实测一次）
+            echo "--- [FinaSU] .config 中的钩子后端 ---"
+            grep -E '^CONFIG_KSU_HOOK_(SUSFS_INLINE|TRACEPOINT)=y' out/.config || \
+              echo "::warning::out/.config 中未找到 FinaSU 钩子后端配置项，将使用 Kconfig 默认值(Tracepoint)"
           fi
 
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error $KSU_EXTRA_ARGS Image
@@ -805,6 +864,12 @@ jobs:
           fi
           zip -r ../$AK3_NAME ./*
           echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
+          # 钩子后端透传给 release job（GITHUB_ENV 不能跨 job），非 FinaSU 分支记为 n/a
+          if [[ "${{ github.event.inputs.ksu_type }}" == "finasu" ]]; then
+            echo "hookname=${FINASU_HOOK:-tracepoint}" >> $GITHUB_OUTPUT
+          else
+            echo "hookname=n/a" >> $GITHUB_OUTPUT
+          fi
           
           #为AK3添加注释（调试信息）
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
@@ -822,6 +887,7 @@ jobs:
           echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
+          echo "KSU Hook: ${FINASU_HOOK:-n/a}" >> ./ak3.log
           echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
@@ -895,6 +961,16 @@ jobs:
             KSU_TYPENAME="无内置KSU"
           fi
           echo "KSU_TYPENAME=$KSU_TYPENAME" >> $GITHUB_ENV
+          if [[ "${{ github.event.inputs.ksu_type }}" == "finasu" ]]; then
+            if [[ "${{ needs.build.outputs.hookname }}" == "susfs_inline" ]]; then
+              HOOK_NOTE="- FinaSU钩子后端：SUSFS Inline（内联直调，管理器内应显示 SUSFS Inline）"
+            else
+              HOOK_NOTE="- FinaSU钩子后端：Tracepoint（内核树缺少 Inline 直调点时自动回退）"
+            fi
+          else
+            HOOK_NOTE=""
+          fi
+          echo "HOOK_NOTE=$HOOK_NOTE" >> $GITHUB_ENV
          
       - name: 创建发布
         id: create_release
@@ -907,6 +983,7 @@ jobs:
           - 编译时间: ${{ env.TIME_FORM }}
           - 机型：欧加真骁龙8Elite通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于一加13 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 版官方OKI源码）
           - KSU分支：${{ env.KSU_TYPENAME }}
+          ${{ env.HOOK_NOTE }}
           - susfs支持：${{ github.event.inputs.susfs_enable }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
           - LZ4支持：${{ github.event.inputs.lz4_enable }}
@@ -923,6 +1000,7 @@ jobs:
           - FinaSU管理器下载：[FinaSU](https://github.com/LyraVoid/FinaSU/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
           - 注：FinaSU 以内置(非LKM)方式编译，内核内已固化 FinaSU 官方管理器证书(CN=FolkSU)；若使用自行签名的管理器，需用其证书重新构建内核
+          - 注：SUSFS Inline 需要内核树在这些位置存在 FinaSU 的直调入口(drivers/input/input.c、fs/exec.c、fs/open.c、fs/stat.c、fs/read_write.c、kernel/reboot.c、kernel/sys.c)；上游 SUSFS 补丁未提供时会按 finasu_hook 设置回退或直接报错
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
