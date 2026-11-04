@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu_type:
-        description: 'KernelSU分支(BakaSU/SukiSU Ultra/KernelSU Next/KSU(原版)/无内置KSU,默认BakaSU)'
+        description: 'KernelSU分支(BakaSU/SukiSU Ultra/KernelSU Next/KSU(原版)/FinaSU/无内置KSU,默认BakaSU)'
         required: true
         type: choice
         default: 'bakasu'
@@ -21,6 +21,7 @@ on:
           - 'sukisu'
           - 'ksunext'
           - 'ksu'
+          - 'finasu'
           - 'none'
       susfs_enable:
         description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
@@ -90,6 +91,11 @@ on:
         required: true
         type: boolean
         default: 'false'
+      finasu_ref:
+        description: 'FinaSU分支/tag(仅KSU分支选择finasu时生效,留空则使用上游setup.sh默认分支)'
+        required: false
+        type: string
+        default: ''
       kernel_suffix:
         description: '内核后缀(留空默认,开头别加连字符,勿加空格等影响指令运行的保留字符)'
         required: false
@@ -247,6 +253,8 @@ jobs:
 
       - name: 添加KernelSU
         id: ksu_version
+        env:
+          FINASU_REF_ARG: ${{ github.event.inputs.finasu_ref }}
         run: |
           # 进入内核工作目录
           cd kernel_workspace
@@ -283,6 +291,35 @@ jobs:
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
             sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+          elif [[ ${{ github.event.inputs.ksu_type }} == "finasu" ]]; then
+            echo "正在配置 FinaSU (LyraVoid/FinaSU)..."
+            # 上游 setup.sh：克隆/更新 FinaSU 并软链接至 drivers/kernelsu，同时改写 drivers/Makefile 与 drivers/Kconfig
+            FINASU_SETUP_URL="https://raw.githubusercontent.com/LyraVoid/FinaSU/refs/heads/master/kernel/setup.sh"
+            FINASU_SETUP_BUILTIN="$GITHUB_WORKSPACE/lib/FinaSU_setup.sh"
+            FINASU_SETUP_FILE="$RUNNER_TEMP/finasu_setup.sh"
+            if curl -fsSL "$FINASU_SETUP_URL" -o "$FINASU_SETUP_FILE" && [ -s "$FINASU_SETUP_FILE" ]; then
+              echo "已获取上游最新 FinaSU setup.sh"
+            elif [ -s "$FINASU_SETUP_BUILTIN" ]; then
+              echo "上游获取失败，回退使用仓库内置的 lib/FinaSU_setup.sh"
+              cp -f "$FINASU_SETUP_BUILTIN" "$FINASU_SETUP_FILE"
+            else
+              echo "无法获取 FinaSU setup.sh，终止构建"
+              exit 1
+            fi
+            # 无参数执行即使用脚本内置默认分支(FINASU_REF)；也可通过 finasu_ref 输入指定分支/tag
+            if [ -n "${FINASU_REF_ARG:-}" ]; then
+              echo "指定 FinaSU 版本：$FINASU_REF_ARG"
+              bash "$FINASU_SETUP_FILE" "$FINASU_REF_ARG"
+            else
+              bash "$FINASU_SETUP_FILE"
+            fi
+            [ -d FinaSU/kernel ] || { echo "FinaSU 源码初始化失败：未找到 FinaSU/kernel"; exit 1; }
+            [ -e common/drivers/kernelsu ] || { echo "FinaSU 挂载失败：common/drivers/kernelsu 不存在"; exit 1; }
+            cd FinaSU
+            # 生成自定义版本号（基于提交计数）, 失败时使用 30000
+            KSU_VERSION=$(expr $(git rev-list --count HEAD 2>/dev/null || echo 0) + 30000)
+            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
           else
             echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
           fi
@@ -680,6 +717,8 @@ jobs:
             KSU_TYPENAME="KSUNext"
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             KSU_TYPENAME="KSU"
+          elif [[ ${{ github.event.inputs.ksu_type }} == "finasu" ]]; then
+            KSU_TYPENAME="FinaSU"
           else
             KSU_TYPENAME="none"
           fi
@@ -780,6 +819,8 @@ jobs:
             KSU_TYPENAME="KernelSU Next"
           elif [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             KSU_TYPENAME="KSU"
+          elif [[ ${{ github.event.inputs.ksu_type }} == "finasu" ]]; then
+            KSU_TYPENAME="FinaSU"
           else
             KSU_TYPENAME="无内置KSU"
           fi
@@ -810,6 +851,7 @@ jobs:
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
+          - FinaSU管理器下载：[FinaSU](https://github.com/LyraVoid/FinaSU/releases)
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
