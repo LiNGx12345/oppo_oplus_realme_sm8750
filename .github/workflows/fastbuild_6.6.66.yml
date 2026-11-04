@@ -312,8 +312,19 @@ jobs:
               # FinaSU 只做“内核侧 SUSFS 实现”对接，driver 侧补丁已内置在自身源码中；
               # 其 kernel/extension/susfs.c 依赖上游固定提交提供的接口，故此处固定上游 50 补丁，不使用 oki 分支
               echo "正在为 FinaSU 添加 SUSFS 内核侧补丁(上游固定提交)..."
-              git clone https://github.com/simonpunk/susfs4ksu.git susfs4ksu
-              git -C susfs4ksu checkout 4a4cb1be85a4694372d3efb9420de69982eac29a
+              # 注意：SUSFS 上游仓库在 GitLab，github.com/simonpunk/susfs4ksu 并不存在
+              # （clone 会返回 401 -> fatal: could not read Username for 'https://github.com'）
+              git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+              if ! git -C susfs4ksu checkout -q 4a4cb1be85a4694372d3efb9420de69982eac29a; then
+                echo "固定提交不在默认分支上，补全全部分支与标签后重试..."
+                git -C susfs4ksu fetch --all --tags --prune
+                if ! git -C susfs4ksu checkout -q 4a4cb1be85a4694372d3efb9420de69982eac29a; then
+                  echo "::error::无法检出 SUSFS 上游固定提交 4a4cb1be85a4694372d3efb9420de69982eac29a，可用分支如下："
+                  git -C susfs4ksu branch -r | head -40 || true
+                  exit 1
+                fi
+              fi
+              echo "SUSFS 上游提交：$(git -C susfs4ksu rev-parse --short=12 HEAD)"
             else
               echo "正在添加susfs补丁..."
               git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
